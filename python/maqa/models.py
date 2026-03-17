@@ -6,12 +6,12 @@ from pydantic import BaseModel, ConfigDict
 
 
 class MAQABaseModel(BaseModel):
-    # 所有领域对象都按不可变快照处理，便于推理和测试。
+    # Treat all domain objects as immutable snapshots for safer reasoning and testing.
     model_config = ConfigDict(frozen=True)
 
 
 class Broker(MAQABaseModel):
-    # 排序引擎所需的最小经纪人状态。
+    # Minimal broker state required by the ranking engine.
     broker_id: str
     quota_q: float
     allocated_count: float = 0.0
@@ -26,20 +26,20 @@ class Broker(MAQABaseModel):
 
 
 class Lead(MAQABaseModel):
-    # 当前版本刻意保持极简，只保留排序链路需要的线索信息。
+    # Keep the current version intentionally minimal and only store lead data needed by ranking.
     lead_id: str
     created_at: datetime | None = None
 
 
 class RankingContext(MAQABaseModel):
-    # 月度进度、衰减等公式依赖的时间上下文。
+    # Time context required by pacing and decay formulas.
     now: datetime
     day_index: int
     days_in_month: int
 
 
 class ScoreBreakdown(MAQABaseModel):
-    # 单个经纪人在当前线索和时间点下的完整打分明细。
+    # Full score breakdown for a single broker at the current lead and time context.
     fit: float
     quota_gap: float
     burst: float
@@ -51,25 +51,25 @@ class ScoreBreakdown(MAQABaseModel):
 
 
 class RankedBroker(MAQABaseModel):
-    # 将经纪人与其得分绑定，便于排序和回溯。
+    # Bind a broker to its score for sorting and traceability.
     broker: Broker
     score: ScoreBreakdown
 
 
 class RankingResult(MAQABaseModel):
-    # 排序引擎的主输出：按分数降序排列的经纪人列表。
+    # Main engine output: brokers sorted in descending score order.
     ranked_brokers: tuple[RankedBroker, ...]
 
     @property
     def top_broker(self) -> Broker | None:
-        # 如需默认选一个人，取排序第一名。
+        # Return the first ranked broker when a default single choice is needed.
         if not self.ranked_brokers:
             return None
         return self.ranked_brokers[0].broker
 
     @property
     def top_score(self) -> ScoreBreakdown | None:
-        # 返回第一名对应的完整打分明细。
+        # Return the complete score breakdown of the first-ranked broker.
         if not self.ranked_brokers:
             return None
         return self.ranked_brokers[0].score

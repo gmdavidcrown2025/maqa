@@ -5,7 +5,7 @@ import (
 	"math"
 )
 
-// Config 定义 MAQA 排序公式涉及的全部控制参数。
+// Config defines all control parameters used by the MAQA ranking formulas.
 type Config struct {
 	WFit     float64
 	WQ       float64
@@ -21,7 +21,7 @@ type Config struct {
 	NoiseEps float64
 }
 
-// DefaultConfig 返回与 Python 版本保持一致的默认参数。
+// DefaultConfig returns the default parameters aligned with the Python implementation.
 func DefaultConfig() Config {
 	return Config{
 		WFit:     0.50,
@@ -39,7 +39,7 @@ func DefaultConfig() Config {
 	}
 }
 
-// Validate 校验配置是否合法，当前重点约束 4 个权重之和必须为 1。
+// Validate checks whether the configuration is valid. The main constraint is that the four weights must sum to 1.
 func (c Config) Validate() error {
 	weightSum := c.WFit + c.WQ + c.WB + c.WSrv
 	if math.Abs(weightSum-1.0) > 1e-9 {

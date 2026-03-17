@@ -2,7 +2,7 @@ package maqa
 
 import "time"
 
-// Broker 表示排序引擎消费的经纪人状态快照。
+// Broker represents the broker state snapshot consumed by the ranking engine.
 type Broker struct {
 	BrokerID       string
 	QuotaQ         float64
@@ -17,20 +17,20 @@ type Broker struct {
 	SLAOK          bool
 }
 
-// Lead 表示当前待排序的线索。
+// Lead represents the lead currently being ranked.
 type Lead struct {
 	LeadID    string
 	CreatedAt *time.Time
 }
 
-// RankingContext 提供月度进度计算所需的时间上下文。
+// RankingContext provides the time context required by monthly pacing formulas.
 type RankingContext struct {
 	Now         time.Time
 	DayIndex    int
 	DaysInMonth int
 }
 
-// ScoreBreakdown 保存单个 broker 的完整评分明细。
+// ScoreBreakdown stores the full score details for a single broker.
 type ScoreBreakdown struct {
 	Fit            float64
 	QuotaGap       float64
@@ -42,18 +42,18 @@ type ScoreBreakdown struct {
 	NoisyScore     float64
 }
 
-// RankedBroker 将 broker 与其得分绑定。
+// RankedBroker binds a broker to its score.
 type RankedBroker struct {
 	Broker Broker
 	Score  ScoreBreakdown
 }
 
-// RankingResult 是排序引擎的主输出。
+// RankingResult is the main output of the ranking engine.
 type RankingResult struct {
 	RankedBrokers []RankedBroker
 }
 
-// TopBroker 返回排序第一名；若列表为空则返回 nil。
+// TopBroker returns the first-ranked broker, or nil when the ranking is empty.
 func (r RankingResult) TopBroker() *Broker {
 	if len(r.RankedBrokers) == 0 {
 		return nil
@@ -61,7 +61,7 @@ func (r RankingResult) TopBroker() *Broker {
 	return &r.RankedBrokers[0].Broker
 }
 
-// TopScore 返回第一名对应的打分明细；若列表为空则返回 nil。
+// TopScore returns the score breakdown of the first-ranked broker, or nil when the ranking is empty.
 func (r RankingResult) TopScore() *ScoreBreakdown {
 	if len(r.RankedBrokers) == 0 {
 		return nil

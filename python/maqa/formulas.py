@@ -8,7 +8,7 @@ from .models import Broker, Lead, RankingContext, ScoreBreakdown
 
 
 class ScoreCalculator:
-    # 集中管理所有评分公式，避免引擎层混入过多数学细节。
+    # Centralize all scoring formulas so the engine does not mix in math details.
     def __init__(self, config: MAQAConfig | None = None) -> None:
         self.config = config or MAQAConfig()
 
@@ -21,7 +21,7 @@ class ScoreCalculator:
         return quota_q * day_index / days_in_month
 
     def calc_fit(self, broker: Broker, lead: Lead) -> float:
-        # 当前简化版中，Fit 由上游直接预计算后传入。
+        # In the simplified version, Fit is precomputed upstream and passed in directly.
         del lead
         return self.clamp_unit(broker.fit_score)
 
@@ -32,20 +32,20 @@ class ScoreCalculator:
         day_index: int,
         days_in_month: int,
     ) -> float:
-        # 比较当前累计分配量与本月理想节奏之间的偏差。
+        # Compare current allocation with the ideal monthly pace at the current date.
         target_value = self.target_cumulative(quota_q, day_index, days_in_month)
         denominator = max(target_value, self.config.epsilon_q * quota_q)
         zscore = (target_value - allocated_count) / denominator
         return tanh(self.config.alpha_q * zscore)
 
     def calc_burst(self, last_24h_count: float, last_7d_count: float) -> float:
-        # 用短期分配量相对近期基线的偏离程度来抑制灌单。
+        # Penalize short-term spikes relative to the recent baseline.
         baseline = last_7d_count / 7.0
         zscore = (last_24h_count - baseline - self.config.delta_b) / max(baseline, self.config.epsilon_b)
         return min(self.config.b_max, max(0.0, zscore))
 
     def calc_service(self, broker: Broker) -> float:
-        # Service 只做轻量的可接单性和负载修正。
+        # Service is a light adjustment based on availability and current load.
         if not broker.is_eligible or not broker.sla_ok:
             return 0.0
         response_score = self.clamp_unit(broker.response_score)
@@ -59,7 +59,7 @@ class ScoreCalculator:
         day_index: int,
         days_in_month: int,
     ) -> float:
-        # 超额后不硬停，而是随超额量和月进度逐步衰减。
+        # Apply tail decay after a broker goes over quota instead of hard-stopping allocation.
         over_quota = max(0.0, allocated_count - quota_q)
         if over_quota <= 0:
             return 1.0
@@ -75,7 +75,7 @@ class ScoreCalculator:
         )
 
     def add_noise(self, score: float, rng: Random | None = None) -> float:
-        # 扰动仅用于打破近似平分，不应覆盖明显分差。
+        # Add a tiny perturbation only to break near-ties, not to override clear score gaps.
         random_source = rng or Random()
         return score + random_source.random() * self.config.noise_eps
 
@@ -86,7 +86,7 @@ class ScoreCalculator:
         context: RankingContext,
         rng: Random | None = None,
     ) -> ScoreBreakdown:
-        # 组装单个候选经纪人的完整可审计评分记录。
+        # Build the full auditable scoring record for a single broker.
         fit = self.calc_fit(broker, lead)
         quota_gap = self.calc_quota_gap(
             quota_q=broker.quota_q,

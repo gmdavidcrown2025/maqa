@@ -8,7 +8,7 @@ from .models import Broker, Lead, RankedBroker, RankingContext, RankingResult
 
 
 class MAQAEngine:
-    # 负责过滤候选人并完成排序，默认第一名即为建议人选。
+    # Filter candidates and produce the final ranking, with the first item as the default choice.
     def __init__(self, config: MAQAConfig | None = None, calculator: ScoreCalculator | None = None) -> None:
         self.config = config or MAQAConfig()
         self.calculator = calculator or ScoreCalculator(self.config)
@@ -24,7 +24,7 @@ class MAQAEngine:
         context: RankingContext,
         rng: Random | None = None,
     ) -> RankingResult:
-        # 主入口：过滤候选人、打分并按分数降序返回。
+        # Main entry point: filter, score, and return brokers in descending score order.
         ranked_brokers = tuple(
             RankedBroker(
                 broker=broker,

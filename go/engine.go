@@ -5,13 +5,13 @@ import (
 	"sort"
 )
 
-// MAQAEngine 负责过滤候选 broker 并输出降序排序结果。
+// MAQAEngine filters candidate brokers and returns the final descending ranking.
 type MAQAEngine struct {
 	Config     Config
 	Calculator *ScoreCalculator
 }
 
-// NewEngine 创建排序引擎。
+// NewEngine creates a ranking engine.
 func NewEngine(config Config) (*MAQAEngine, error) {
 	calculator, err := NewScoreCalculator(config)
 	if err != nil {
@@ -20,17 +20,17 @@ func NewEngine(config Config) (*MAQAEngine, error) {
 	return &MAQAEngine{Config: config, Calculator: calculator}, nil
 }
 
-// NewDefaultEngine 使用默认参数创建排序引擎。
+// NewDefaultEngine creates a ranking engine with default parameters.
 func NewDefaultEngine() (*MAQAEngine, error) {
 	return NewEngine(DefaultConfig())
 }
 
-// IsEligible 判断 broker 是否允许参与排序。
+// IsEligible checks whether a broker is allowed to participate in ranking.
 func (e MAQAEngine) IsEligible(broker Broker) bool {
 	return broker.IsEligible && broker.SLAOK
 }
 
-// Rank 是 Go 版本 MAQA 的主入口：过滤、打分并按 noisy_score 降序返回。
+// Rank is the main entry point of the Go MAQA implementation: filter, score, and sort by noisy_score descending.
 func (e MAQAEngine) Rank(brokers []Broker, lead Lead, context RankingContext, rng *rand.Rand) RankingResult {
 	ranked := make([]RankedBroker, 0, len(brokers))
 	for _, broker := range brokers {

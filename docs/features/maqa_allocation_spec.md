@@ -1,628 +1,614 @@
-# MAQA 排序算法说明
+# MAQA Ranking Algorithm Specification
 
-## 1. 文档目标
+[English](maqa_allocation_spec.md) | [简体中文](maqa_allocation_spec.zh-CN.md)
 
-本文档描述当前仓库中 MAQA 的实际算法逻辑，重点说明：
+## 1. Purpose
 
-- 排序问题是如何被建模的
-- 每个评分项解决什么业务问题
-- 总分公式如何组合
-- 参数分别控制什么行为
-- 当前实现刻意省略了哪些复杂度
+This document describes the actual MAQA algorithm implemented in this repository. It focuses on:
 
-本文档以算法原理和逻辑为主，不展开代码级实现细节。
+- how the ranking problem is modeled
+- what business problem each score component solves
+- how the total score is composed
+- what each parameter controls
+- what complexity is intentionally left out of the current version
 
-## 2. 算法定位
+The goal of this document is to explain algorithmic logic and business rationale rather than code-level implementation details.
 
-当前 MAQA 的定位是一个 Broker 排序算法，而不是完整的分配执行系统。
+## 2. Positioning
 
-给定：
+The current MAQA implementation is a broker ranking algorithm, not a full allocation execution system.
 
-- 一条 lead
-- 一组 broker 当前状态快照
-- 当前时间上下文
+Given:
 
-算法输出：
+- one lead
+- a set of broker state snapshots
+- a time context
 
-- 一组 broker 的降序排序结果
+The algorithm outputs:
 
-如果业务只需要一个默认推荐人选，那么通常取排序第一名即可；但算法本身的主职责是排序，而不是直接执行业务分配。
+- a descending ranking of brokers
 
-## 3. 算法希望同时平衡什么
+If the business only needs one default recommendation, the first broker in the ranking is typically used. But the primary responsibility of MAQA is ranking, not executing the final allocation workflow.
 
-MAQA 的目标不是只看单一匹配度，而是在排序时同时兼顾四类因素：
+## 3. What MAQA Tries to Balance
 
-1. 匹配质量
-   lead 与 broker 是否适合
+MAQA is not a single-factor fit-based ranker. It tries to balance four dimensions at the same time:
 
-2. 月度节奏
-   broker 当前是否落后于本月应有进度，是否需要补量
+1. Matching quality
+   Whether the lead and broker are a good fit.
 
-3. 短期平滑
-   broker 最近 24 小时是否已经被集中灌入过多 lead
+2. Monthly pacing
+   Whether the broker is behind the expected monthly pace and should be compensated.
 
-4. 服务承接能力
-   broker 当前是否还处于较好的可承接状态
+3. Short-term smoothing
+   Whether the broker has already received too many leads in the last 24 hours.
 
-除此之外，算法还额外处理一个特殊问题：
+4. Service readiness
+   Whether the broker is still in a good operational state to take more leads.
 
-- 当 broker 已超过月目标时，不立即完全停止，而是继续保留一个逐步衰减的尾流机会
+In addition, MAQA handles a special case:
 
-因此，当前算法不是“轮询”，也不是“只看 fit 的单指标排序”，而是一个多因素综合排序模型。
+- when a broker has exceeded the monthly target, the broker is not cut off immediately, but continues to receive a decaying tail opportunity
 
-## 4. 当前输入抽象
+So MAQA is neither a round-robin scheduler nor a fit-only ranking rule. It is a multi-factor ranking model.
 
-### 4.1 Broker 快照
+## 4. Input Abstraction
 
-每个 broker 在排序时都被看作一个状态快照，当前核心输入包括：
+### 4.1 Broker Snapshot
 
-- 月目标量 `quota_q`
-- 本月已分配量 `allocated_count`
-- 最近 24 小时分配量 `last_24h_count`
-- 最近 7 天分配量 `last_7d_count`
-- 预计算好的匹配分 `fit_score`
-- 是否允许参与排序 `is_eligible`
-- 响应能力分 `response_score`
-- 当前负载 `current_load`
-- SLA 是否正常 `sla_ok`
+Each broker is represented as a state snapshot. The current core inputs are:
 
-这些值都应由上游系统准备好。MAQA 当前不负责从数据库、CRM 或服务监控中生产这些特征。
+- monthly target `quota_q`
+- current monthly allocated count `allocated_count`
+- allocated count in the last 24 hours `last_24h_count`
+- allocated count in the last 7 days `last_7d_count`
+- precomputed fit score `fit_score`
+- aggregated eligibility flag `is_eligible`
+- response readiness score `response_score`
+- current load `current_load`
+- SLA status `sla_ok`
+
+These values are expected to be prepared by upstream systems. MAQA does not currently derive these features from databases, CRM systems, or service monitoring systems.
 
 ### 4.2 Lead
 
-当前版本中，lead 只作为排序对象本身存在。`fit` 不在库内现场计算，而是假设上游已经把 broker 对该 lead 的匹配分算好并填入 `fit_score`。
+In the current version, lead exists mainly as the ranking target itself. `Fit` is not computed inside MAQA. The algorithm assumes upstream systems have already computed the broker-to-lead fit and stored it in `fit_score`.
 
-### 4.3 时间上下文
+### 4.3 Time Context
 
-当前时间上下文至少包括：
+The time context currently includes at least:
 
-- 当前是本月第几天 `day_index`
-- 本月总天数 `days_in_month`
+- day of month `day_index`
+- total number of days in month `days_in_month`
 
-这使算法可以把“本月累计量”转换成“按今天来看是否领先或落后”。
+This lets the algorithm transform absolute monthly counts into pace-relative deviations.
 
-## 5. 总体评分结构
+## 5. Overall Scoring Structure
 
-当前算法先计算一个基础综合分，再对超额 broker 施加尾流衰减，最后加入极小扰动用于打破近似平分。
+The current algorithm first computes a base composite score, then applies over-quota decay, and finally adds a very small perturbation to break near-ties.
 
-### 5.1 基础综合分
-
-基础综合分定义为：
+### 5.1 Base Composite Score
 
 ```math
 RawScore_i = w_{fit} \cdot Fit_i + w_q \cdot QuotaGap_i - w_b \cdot Burst_i + w_{srv} \cdot Service_i
 ```
 
-其中：
+Where:
 
-- `Fit` 越高越好
-- `QuotaGap` 越高越好
-- `Burst` 越高越差，因此在总分中做减法
-- `Service` 越高越好
+- `Fit` is better when larger
+- `QuotaGap` is better when larger
+- `Burst` is worse when larger, so it is subtracted
+- `Service` is better when larger
 
-### 5.2 超额衰减后得分
+### 5.2 Score After Over-Quota Decay
 
 ```math
 FinalScore_i = RawScore_i \cdot OverQuotaDecay_i
 ```
 
-这一步用于处理“超过月目标后的尾流”。
+This is the tail-decay step for brokers who have exceeded quota.
 
-### 5.3 用于排序的最终值
+### 5.3 Final Sorting Value
 
 ```math
 NoisyScore_i = FinalScore_i + U(0, noise\_eps)
 ```
 
-其中 `U(0, noise_eps)` 表示一个很小的均匀随机扰动，用于打破近似平分。当前默认扰动幅度已经收敛为很小的 `0.001`，它的目标是避免固定输入顺序造成的机械并列，而不是主动改写明显的分差。
+Here `U(0, noise_eps)` is a very small uniform perturbation used to break near-ties. The default amplitude has already been reduced to `0.001`. Its job is to avoid mechanically fixed ordering caused by input order, not to override meaningful score differences.
 
-排序时按 `NoisyScore` 降序排列。
+Ranking is performed in descending order of `NoisyScore`.
 
-## 6. 各评分项的业务含义与公式
+## 6. Score Components and Formulas
 
-### 6.1 Fit：匹配质量主信号
+### 6.1 Fit: The Primary Matching Signal
 
-`Fit` 表示 broker 与当前 lead 的匹配程度。
+`Fit` represents how suitable the broker is for the current lead.
 
-当前实现中，`Fit` 不在 MAQA 内部展开计算，而是直接读取上游提供的 `fit_score`，并裁剪到 `0` 到 `1` 的范围内。
+In the current implementation, `Fit` is not computed inside MAQA. MAQA directly reads upstream `fit_score` and clamps it to the range `[0, 1]`.
 
-它的定位是：
+Its role is:
 
-- 当前排序中最主要的正向因素
-- 表示“适不适合”
-- 不是唯一因素，但权重最高
+- the most important positive signal in the ranking
+- the main representation of suitability
+- not the only factor, but the most heavily weighted one
 
-当前默认权重中，`Fit` 占比最高，说明当前实现优先保证匹配质量。
+The default weights prioritize matching quality first.
 
-### 6.2 QuotaGap：月度节奏修正项
+### 6.2 QuotaGap: Monthly Pacing Adjustment
 
-`QuotaGap` 解决的问题是：
+`QuotaGap` solves the following problem:
 
-- 不能只看 broker 离月目标还差多少
-- 而应该看按今天这个日期，他是否落后于本月理想进度
+- it is not enough to look at how far a broker is from the monthly target in absolute terms
+- instead, the algorithm should look at whether the broker is behind or ahead relative to the expected pace at the current day of the month
 
-先定义按线性月进度推导出的理想累计值：
+First define the ideal cumulative target under linear monthly pacing:
 
 ```math
 Target = quota_q \cdot \frac{day\_index}{days\_in\_month}
 ```
 
-这表示：如果月目标是 `quota_q`，那么到本月第 `day_index` 天时，理想上应该完成多少。
-
-然后计算相对偏差：
+Then compute normalized deviation:
 
 ```math
 z = \frac{Target - allocated\_count}{\max(Target, \epsilon_q \cdot quota_q)}
 ```
 
-再通过双曲正切压缩到有限区间：
+Then compress the value using hyperbolic tangent:
 
 ```math
 QuotaGap = tanh(\alpha_q \cdot z)
 ```
 
-它的业务含义是：
+Business interpretation:
 
-- 落后目标节奏时，`QuotaGap > 0`
-- 接近目标节奏时，`QuotaGap \approx 0`
-- 明显超前时，`QuotaGap < 0`
+- if the broker is behind pace, `QuotaGap > 0`
+- if the broker is near pace, `QuotaGap \approx 0`
+- if the broker is clearly ahead, `QuotaGap < 0`
 
-这里使用 `tanh` 的原因是避免极端落后或极端超前时数值无限放大，使该项始终保持可控。
+`tanh` is used to keep the term bounded and numerically stable even when a broker is extremely behind or ahead.
 
-### 6.3 Burst：短周期防灌单项
+### 6.3 Burst: Short-Term Anti-Spike Term
 
-`Burst` 解决的问题是：
+`Burst` solves the following problem:
 
-- 某 broker 可能本月总体仍然落后
-- 但在最近 24 小时内已经被连续灌入过多 lead
-- 此时仍然需要在短期上压一压，避免过度集中
+- a broker may still be behind on monthly pace
+- but may already have received too many leads in the last 24 hours
+- in that case, the algorithm should still suppress short-term concentration
 
-先定义 broker 最近一周的日均基线：
+First define the recent daily baseline from the last 7 days:
 
 ```math
 Baseline = \frac{last\_7d\_count}{7}
 ```
 
-然后比较最近 24 小时的实际量是否显著高于这个基线：
+Then compare the last 24 hours against this baseline:
 
 ```math
 z = \frac{last\_24h\_count - Baseline - \delta_b}{\max(Baseline, \epsilon_b)}
 ```
 
-最后只保留正半轴并设置上限：
+Then keep only the positive half-axis and cap it:
 
 ```math
 Burst = \min(b_{max}, \max(0, z))
 ```
 
-它的业务含义是：
+Business interpretation:
 
-- 如果最近 24 小时分配量接近日常水平，则 `Burst = 0` 或很小
-- 如果最近 24 小时明显高于日常基线，则 `Burst` 变大
-- `Burst` 越大，排序中扣分越多
+- if the last 24 hours are close to normal, `Burst = 0` or very small
+- if the last 24 hours are significantly above the baseline, `Burst` increases
+- larger `Burst` produces a larger deduction in ranking
 
-因此，`Burst` 是一个短周期反拥塞项，它并不判断“该不该给这个 broker”，而是在判断“当前这一小段时间里，是否已经给得太密了”。
+So `Burst` is a short-cycle anti-congestion term. It does not answer whether the broker should get leads in general. It answers whether the broker has already been given too many leads in the immediate recent window.
 
-### 6.4 Service：服务承接能力修正项
+### 6.4 Service: Service Readiness Adjustment
 
-`Service` 表示 broker 当前的实时承接能力。
+`Service` represents the broker's current operational readiness.
 
-它主要回答的问题是：
+It answers the question:
 
-- 这个 broker 现在是不是还处于适合继续接 lead 的状态
+- is this broker still in a good state to continue taking leads right now?
 
-当前实现中，`Service` 主要由两部分组成：
+In the current implementation, `Service` is based mainly on:
 
-- `response_score`：响应能力或服务质量
-- `current_load`：当前负载水平
+- `response_score`: service quality or response capability
+- `current_load`: current workload level
 
-如果 broker 不满足基础参与条件，则 `Service = 0`。否则：
+If the broker fails the basic participation condition, then `Service = 0`. Otherwise:
 
 ```math
 Service = clamp(response\_score, 0, 1) \cdot \left(1 - 0.5 \cdot clamp(current\_load, 0, 1)\right)
 ```
 
-再截断到 `0` 到 `1` 范围。
+Then it is clamped to `[0, 1]`.
 
-它的业务含义是：
+Business interpretation:
 
-- 响应能力越强，`Service` 越高
-- 当前负载越高，`Service` 越低
-- 它不是主导项，而是一个轻量修正项
+- stronger response capability increases `Service`
+- higher current load decreases `Service`
+- it is a light adjustment term rather than a primary driver
 
-因此，`Service` 不是在评价“是否匹配”，而是在评价“当前接单状态好不好”。
+So `Service` is not about lead-to-broker suitability. It is about whether the broker is currently in a good operational state to take more work.
 
-### 6.5 OverQuotaDecay：超额尾流衰减项
+### 6.5 OverQuotaDecay: Tail Decay After Exceeding Quota
 
-`OverQuotaDecay` 用于处理月目标已经完成甚至超额之后的排序行为。
+`OverQuotaDecay` governs ranking behavior after a broker has already reached or exceeded monthly quota.
 
-它解决的问题是：
+It solves the following problem:
 
-- 达到月目标后，不能马上完全停单
-- 但也不能继续和未达标 broker 完全同权竞争
+- a broker should not be cut off immediately after reaching quota
+- but a broker who is already over quota should not keep competing with under-target brokers on exactly equal footing
 
-先定义超额量：
+First define the exceeded amount:
 
 ```math
 over = \max(0, allocated\_count - quota_q)
 ```
 
-如果没有超额：
+If there is no over-quota amount:
 
 ```math
 OverQuotaDecay = 1
 ```
 
-如果已经超额：
+If the broker is already over quota:
 
 ```math
 OverQuotaDecay = e^{-\beta \cdot over} \cdot \left(\frac{day\_index}{days\_in\_month}\right)^{\eta}
 ```
 
-这表示：
+This means:
 
-- 超额越多，衰减越强
-- 越接近月底，衰减相对越弱
+- the more over quota, the stronger the decay
+- the closer to month end, the weaker the decay
 
-它的直觉是：
+Intuition:
 
-- 月中就超很多，不应继续高频拿量
-- 但月底时，即使超额，也可以保留更温和的尾流机会
+- if a broker exceeds quota significantly in the middle of the month, the broker should not keep winning aggressively
+- but near the end of the month, a softer tail opportunity is acceptable even for over-quota brokers
 
-这是当前 MAQA 中非常关键的一点：超额 broker 不是被硬性排除，而是通过乘性衰减进入“递减竞争”。
+This is an important characteristic of MAQA: over-quota brokers are not hard-filtered out. They stay in the ranking with multiplicative tail decay.
 
-## 7. Eligibility 的当前处理方式
+## 7. Current Eligibility Handling
 
-当前 Eligibility 被刻意收缩为最简形式。
+Eligibility is intentionally reduced to a minimal form in the current version.
 
-broker 参与排序的前提是：
+A broker can participate in ranking only if:
 
 - `is_eligible = True`
 - `sla_ok = True`
 
-这表示：
+This means:
 
-- 复杂的资格判断并不在 MAQA 内部完成
-- 城市、区域、业务品类、值班状态、风控状态等逻辑应由上游系统先处理
-- MAQA 当前只消费一个已经汇总好的“是否允许参与排序”的结果
+- complex eligibility rules are not modeled inside MAQA
+- city, region, business type, schedule, risk control, and other upstream rules should already be resolved before MAQA is called
+- MAQA currently consumes only an aggregated participation result
 
-因此，当前算法把 Eligibility 看作输入前置条件，而不是算法内部的重要建模对象。
+So Eligibility is treated as an upstream precondition rather than a major modeling dimension inside the ranking algorithm.
 
-## 8. 为什么当前采用加权组合，而不是乘法门控
+## 8. Why the Current Design Uses Weighted Addition Instead of Multiplicative Fit Gating
 
-当前实现将 `Fit`、`QuotaGap`、`Burst`、`Service` 组合成加权和，而不是采用“先算一个修正分，再整体乘以 `Fit`”的结构。
+The current implementation combines `Fit`, `QuotaGap`, `Burst`, and `Service` as a weighted sum instead of using a structure such as “compute an adjustment term and multiply everything by `Fit`”.
 
-这样设计的原因是：
+Reasons:
 
-1. 可解释性更强
-   可以直接解释每个项对最终分数的贡献，而不是把多个效果混合进一个乘法结果
+1. Better interpretability
+   Each term’s contribution can be explained directly.
 
-2. 更稳定
-   如果直接用 `Fit` 去整体门控，低 `Fit` broker 将很难因为月度落后、短期平稳或服务更好而获得合理提升
+2. Better stability
+   If `Fit` becomes a global gate, low-fit brokers become much less likely to recover ranking even when they are behind monthly pace, calm in the short term, or operationally stronger.
 
-3. 更容易调参
-   当前阶段的目标是建立一个可运行、可审计、可演进的 baseline，线性组合比多层乘法更适合作为第一版
+3. Easier parameter tuning
+   The current phase aims to establish a runnable, auditable, evolvable baseline. Linear combination is more suitable than deeply nested multiplicative structures for a first version.
 
-因此，当前 MAQA 的设计选择是：
+So the current MAQA choice is:
 
-- `Fit` 是主信号
-- 其他项是并列修正项
-- `OverQuotaDecay` 作为特殊场景下的乘性尾流修正
+- `Fit` is the primary signal
+- the other terms are peer adjustment signals
+- `OverQuotaDecay` is kept as a special multiplicative tail adjustment
 
-## 9. 参数及其作用
+## 9. Parameters and Their Roles
 
-当前默认参数如下：
+Current default parameters are:
 
-### 9.1 权重参数
+### 9.1 Weight Parameters
 
 - `w_fit = 0.50`
 - `w_q = 0.25`
 - `w_b = 0.15`
 - `w_srv = 0.10`
 
-当前实现要求这 4 个权重之和必须等于 `1.0`：
+The current implementation requires the sum of these four weights to be exactly `1.0`:
 
 ```math
 w_{fit} + w_q + w_b + w_{srv} = 1.0
 ```
 
-这样做的目的是：
+Reasons:
 
-- 保持 `RawScore` 的量纲稳定
-- 让各权重更容易被解释为相对重要性
-- 避免调参时因为总权重变化而引入额外的整体放大或缩小
+- to keep the scale of `RawScore` stable
+- to keep each weight interpretable as relative importance
+- to avoid accidentally changing the total score scale during tuning
 
-这组参数表达的当前默认偏好是：
+This default set expresses the current preference:
 
-- 优先保证匹配质量
-- 其次兼顾月度节奏
-- 对短期灌单保持明确惩罚
-- 对服务状态做轻量修正
+- prioritize matching quality first
+- then account for monthly pacing
+- explicitly penalize short-term lead spikes
+- lightly adjust by service readiness
 
-### 9.2 QuotaGap 参数
+### 9.2 QuotaGap Parameters
 
 - `alpha_q = 2.0`
 - `epsilon_q = 0.2`
 
-作用：
+Roles:
 
-- `alpha_q` 控制月度偏差被放大的强度
-- `epsilon_q` 控制在月初或目标很小时，分母不会过小导致数值失稳
+- `alpha_q` controls how aggressively monthly pacing deviations are amplified
+- `epsilon_q` prevents numerical instability when the month is still early or the target is small
 
-### 9.3 Burst 参数
+### 9.3 Burst Parameters
 
 - `delta_b = 0.5`
 - `epsilon_b = 0.5`
 - `b_max = 2.0`
 
-作用：
+Roles:
 
-- `delta_b` 表示容忍的小幅短期波动
-- `epsilon_b` 防止基线很低时除数过小
-- `b_max` 限制极端突刺对总分的影响上限
+- `delta_b` defines a tolerated amount of short-term fluctuation
+- `epsilon_b` prevents instability when the recent baseline is very low
+- `b_max` caps the maximum influence of extreme spikes
 
-### 9.4 OverQuotaDecay 参数
+### 9.4 OverQuotaDecay Parameters
 
 - `beta = 0.8`
 - `eta = 2.0`
 
-作用：
+Roles:
 
-- `beta` 控制超额量带来的衰减强度
-- `eta` 控制月底放松程度
+- `beta` controls how strongly over-quota amount drives decay
+- `eta` controls how much decay relaxes near month end
 
-### 9.5 噪声参数
+### 9.5 Noise Parameter
 
 - `noise_eps = 0.001`
 
-作用：
+Role:
 
-- 只用于打破近似平分
-- 当前取值是非常保守的小扰动，不应对明显分差造成实质改写
+- used only to break near-ties
+- intentionally conservative so it does not override meaningful score differences
 
-## 10. 参数调整思路与指导原则
+## 10. Parameter Tuning Guidance
 
-参数调整不应被理解为“逐个字段反复试错”，而应被理解为对排序偏好的系统性调节。更实用的做法是先明确业务目标，再按优先级逐层调整参数。
+Parameter tuning should not be treated as blind trial-and-error. It should be treated as systematic adjustment of ranking preferences. A practical approach is to define the business objective first, then tune parameters layer by layer.
 
-### 10.1 先明确你要优化什么
+### 10.1 Start by Defining the Optimization Goal
 
-调参前应先回答：当前更想优化哪一类目标。
+Before tuning, decide what you want to optimize more strongly.
 
-常见目标包括：
+Common goals include:
 
-- 提升匹配质量优先级
-- 加强月内节奏追平
-- 抑制短期集中灌单
-- 提高服务承接稳定性
-- 放宽或收紧超额后的尾流
+- prioritizing matching quality more strongly
+- pulling monthly pacing closer to target
+- suppressing short-term lead spikes
+- improving service readiness stability
+- relaxing or tightening the tail opportunity after brokers go over quota
 
-不同目标会对应不同参数组，不建议多个方向同时大幅调整，否则很难判断效果来源。
+Different goals correspond to different groups of parameters. Do not aggressively tune many directions at once, or attribution becomes unclear.
 
-### 10.2 推荐的调参顺序
+### 10.2 Recommended Tuning Order
 
-建议按下面顺序调：
+A practical order is:
 
-1. 先调权重参数
-   因为权重参数直接决定各评分项在总分中的相对重要性，最容易映射到业务偏好。
+1. Tune the weight parameters first.
+   They directly control the relative importance of score components.
 
-2. 再调单项公式的灵敏度参数
-   例如 `alpha_q`、`delta_b`、`beta`。这些参数控制的是某一项内部的响应曲线，而不是整体优先级。
+2. Then tune the sensitivity parameters inside each formula.
+   Examples: `alpha_q`, `delta_b`, `beta`.
 
-3. 最后再调噪声参数
-   `noise_eps` 只负责打破近似平分，通常不应作为主要优化手段。
+3. Tune the noise parameter last.
+   `noise_eps` is only a tie-break tool and should not be used as a primary optimization lever.
 
-### 10.3 权重参数如何调
+### 10.3 How to Tune Weight Parameters
 
 #### `w_fit`
 
-表示匹配质量在总分中的重要程度。
+Represents how important matching quality is in the total score.
 
-- 调大：排序会更偏向高 `fit_score` 的 broker，其他修正项更难推翻高匹配 broker 的领先地位。
-- 调小：月度节奏、短期平滑和服务状态会更容易影响最终排序。
+- Increase it: ranking becomes more dominated by brokers with high `fit_score`.
+- Decrease it: monthly pacing, short-term smoothing, and service state more easily affect the ranking.
 
-适用场景：
+Use it when:
 
-- 如果业务更强调 lead 与 broker 的适配质量，可以调大。
-- 如果业务认为当前 `fit_score` 质量一般，或不希望它过强主导，可以调小。
+- you strongly trust fit quality and want matching quality to dominate
+- or you want fit to be less dominant because the upstream fit model is still weak
 
 #### `w_q`
 
-表示月度节奏修正的重要程度。
+Represents how strongly monthly pacing affects ranking.
 
-- 调大：落后月度进度的 broker 更容易被补量，超前 broker 更容易被压低。
-- 调小：排序会更接近“只看匹配和服务状态”。
+- Increase it: brokers behind target pace are more strongly compensated.
+- Decrease it: ranking becomes closer to fit-plus-service ordering.
 
-适用场景：
+Use it when:
 
-- 如果业务希望更平滑地完成月目标，可以调大。
-- 如果业务不希望 quota 过多影响即时匹配，可以调小。
+- you want smoother monthly progress toward quota
+- or you want quota to have less influence on immediate ranking
 
 #### `w_b`
 
-表示对短期突刺的惩罚强度。
+Represents the penalty strength for short-term spikes.
 
-- 调大：最近 24 小时已经拿量较多的 broker 会更快被压制。
-- 调小：系统会更容忍短周期集中分配。
+- Increase it: brokers who recently received many leads are suppressed more quickly.
+- Decrease it: the system tolerates more short-cycle concentration.
 
-适用场景：
+Use it when:
 
-- 如果业务遇到明显的“短时间灌单”问题，可以调大。
-- 如果业务更看重即时转化，不太在意短期集中，可以适当调小。
+- short-term lead flooding is a real operational issue
+- or you care more about immediate conversion and less about short-term concentration
 
 #### `w_srv`
 
-表示服务承接状态在总分中的影响程度。
+Represents how strongly service readiness affects ranking.
 
-- 调大：响应能力和当前负载对排序的影响更明显。
-- 调小：服务状态只保留非常轻的修正作用。
+- Increase it: response quality and current load matter more.
+- Decrease it: service remains only a light correction.
 
-适用场景：
+Use it when:
 
-- 如果业务认为接单质量和实时服务状态非常关键，可以调大。
-- 如果上游 `response_score` 或 `current_load` 的质量还不稳定，建议先保持较小权重。
+- service state is operationally important and the upstream features are reliable
+- or keep it small when `response_score` and `current_load` are still noisy
 
-### 10.4 QuotaGap 参数如何调
+### 10.4 How to Tune QuotaGap Parameters
 
 #### `alpha_q`
 
-控制 `QuotaGap` 对月度偏差的敏感程度。
+Controls sensitivity to monthly pace deviation.
 
-- 调大：只要略微落后或超前，`QuotaGap` 就会更快接近两端，月度节奏影响会更激进。
-- 调小：`QuotaGap` 的变化更平缓，只有较明显的落后或超前才会体现出较大差异。
+- Increase it: even small deviations quickly produce stronger `QuotaGap` values.
+- Decrease it: the effect changes more gently.
 
-经验上：
+Use it when:
 
-- 想让系统更主动追平月目标，调大。
-- 想让 quota 影响更温和，调小。
+- you want the system to react more aggressively to monthly underperformance
+- or more gently if monthly pacing should be secondary
 
 #### `epsilon_q`
 
-控制 `QuotaGap` 分母下限，主要影响月初或目标量很小时的稳定性。
+Controls the lower bound of the `QuotaGap` denominator.
 
-- 调大：月初阶段更稳，更不容易因为少量分配差异导致 `QuotaGap` 剧烈波动。
-- 调小：月初阶段会更敏感。
+- Increase it: early-month behavior becomes more stable.
+- Decrease it: early-month behavior becomes more sensitive.
 
-经验上：
+Use it when:
 
-- 如果发现月初排序过于跳跃，可以调大。
-- 如果希望系统尽早根据 quota 拉开差距，可以适度调小，但不要过小。
+- early-month ranking feels too jumpy
+- or you want the system to start differentiating brokers earlier
 
-### 10.5 Burst 参数如何调
+### 10.5 How to Tune Burst Parameters
 
 #### `delta_b`
 
-表示对短期波动的容忍带宽。
+Represents the tolerated short-term deviation before penalty starts.
 
-- 调大：需要更明显的 24 小时突刺才会触发惩罚，系统更宽容。
-- 调小：只要略高于基线就会开始惩罚，系统更敏感。
+- Increase it: the system becomes more tolerant of mild spikes.
+- Decrease it: the system penalizes earlier.
 
 #### `epsilon_b`
 
-控制 `Burst` 分母下限，主要影响最近 7 天基线很低时的稳定性。
+Controls the lower bound of the `Burst` denominator.
 
-- 调大：在低基线场景下更稳，不会因为很小的分母导致惩罚过度放大。
-- 调小：低基线 broker 的短期突刺会被更强烈地识别出来。
+- Increase it: low-baseline brokers are treated more conservatively.
+- Decrease it: low-baseline spikes become more sensitive.
 
 #### `b_max`
 
-控制 `Burst` 惩罚上限。
+Controls the maximum burst penalty.
 
-- 调大：允许极端灌单行为产生更大扣分。
-- 调小：即使发生严重突刺，惩罚也会较早封顶。
+- Increase it: extreme concentration can hurt more.
+- Decrease it: the penalty saturates earlier.
 
-经验上：
+Practical guidance:
 
-- 如果业务强烈反感短期集中灌单，可以提高 `w_b` 或适度提高 `b_max`。
-- 如果只是想更早识别轻度突刺，优先调 `delta_b`，而不是盲目抬高上限。
+- if the problem is short-term flooding, first consider increasing `w_b`
+- if the problem is that mild spikes are not noticed early enough, first consider reducing `delta_b`
 
-### 10.6 OverQuotaDecay 参数如何调
+### 10.6 How to Tune OverQuotaDecay Parameters
 
 #### `beta`
 
-控制超额量带来的衰减速度。
+Controls how fast the score decays once a broker is over quota.
 
-- 调大：一旦超额，分数下降更快，超额 broker 更难继续排到前面。
-- 调小：超额后的尾流更宽松。
+- Increase it: over-quota brokers step aside more quickly.
+- Decrease it: tail opportunity remains looser.
 
 #### `eta`
 
-控制月底放松程度。
+Controls how much the decay relaxes near month end.
 
-- 调大：越接近月底，衰减放松得越明显；月中阶段则更严格。
-- 调小：月底与月中的衰减差异会缩小。
+- Increase it: the difference between mid-month and end-of-month decay becomes more obvious.
+- Decrease it: the difference becomes smaller.
 
-经验上：
+Practical guidance:
 
-- 如果希望“超额后尽快让位给未达标 broker”，优先调大 `beta`。
-- 如果希望“月底仍保留适度尾流，不要太死板”，可以调大 `eta`。
+- if you want over-quota brokers to back off quickly, increase `beta`
+- if you still want a softer tail near month end, increase `eta`
 
-### 10.7 噪声参数如何调
+### 10.7 How to Tune Noise
 
 #### `noise_eps`
 
-控制用于打破近似平分的小扰动幅度。
+Controls the amplitude of the tie-breaking perturbation.
 
-- 调大：并列或近似并列时更容易被随机打散，但也更可能影响原本很接近的排序。
-- 调小：排序更稳定、更可复核，但完全同分时更依赖原始顺序。
+- Increase it: near-ties are broken more aggressively, but very close rankings become less stable.
+- Decrease it: rankings become more stable and easier to reproduce.
 
-指导原则：
+Guidance:
 
-- 除非确实观察到大量同分，否则不建议把 `noise_eps` 调大。
-- 当前默认值 `0.001` 是偏保守的推荐值，通常足够作为 tie-breaker。
+- do not increase `noise_eps` unless you actually observe too many ties
+- the default `0.001` is intentionally conservative and is usually enough as a tie-breaker
 
-### 10.8 几条实用调参原则
+### 10.8 Practical Tuning Rules
 
-1. 一次只调一组参数。
-   最好先固定其他参数，只观察一组参数变化对排序的影响。
+1. Tune one group of parameters at a time.
+2. Keep the four weight parameters summing to `1.0`.
+3. Prefer tuning weights before low-level formula parameters.
+4. Prefer small steps rather than large jumps.
+5. Use golden-case replay or historical replay rather than intuition alone.
+6. Judge the final ranking outcome, not just intermediate score movement.
+7. Do not use `noise_eps` as the primary tuning tool.
 
-2. 调整权重时，始终保持 4 个权重之和为 `1.0`。
-   当前实现已经在配置层强制这一约束，因此不能只单独改一个权重而忽略总和。
+## 11. Intentional Simplifications in the Current Version
 
-3. 优先调权重，少动公式下层参数。
-   权重更容易解释，也更容易和业务目标对齐。
+To keep the algorithm core clear, the current version intentionally simplifies several aspects:
 
-4. 优先做小步调整，不要一次大幅改动。
-   例如权重先以 `0.05` 为步长，灵敏度参数先做 10% 到 20% 的调整。
+1. `Fit` is precomputed upstream instead of inside MAQA
+2. Eligibility is reduced to an aggregated boolean result
+3. the algorithm ranks only; it does not perform state write-back after allocation
+4. monthly pacing uses a linear target curve rather than a more complex pacing curve
+5. tie-breaking noise stays simple and minimal
 
-5. 使用固定样例回放，而不是凭直觉判断。
-   建议准备一批黄金样例或历史样本，比较参数变化前后的排序是否符合预期。
+These simplifications intentionally keep MAQA as a clean core ranking library.
 
-6. 关注排序变化，不只关注单项分数变化。
-   调参的最终目标是让排序更符合业务意图，而不是让某个中间分值看起来更漂亮。
+## 12. How to Interpret the Result
 
-7. 不要把噪声参数当作主调参手段。
-   如果排序不符合预期，通常应该先检查权重或单项公式，而不是先改 `noise_eps`。
-## 11. 当前实现中的有意简化
+The output ranking should be interpreted as follows:
 
-为了让算法核心保持清晰，当前版本刻意做了以下简化：
+- a higher rank means the broker is more favorable under the current rules, parameters, and state snapshot
+- the top-ranked broker is usually the default recommendation
+- but semantically the algorithm outputs an ordered candidate list rather than a uniquely mandated winner
 
-1. `Fit` 不在算法内计算，而是由上游预计算
-2. Eligibility 只保留布尔汇总结果，不展开复杂规则树
-3. 只做排序，不做分配后的状态回写
-4. 月度进度采用线性目标曲线，不引入更复杂的累计曲线
-5. 扰动逻辑保持极小且简单，不做复杂 tie-break 策略
+This means upper-layer systems can still choose to:
 
-这些简化的目的是把当前版本明确收敛为一个“核心排序算法库”。
+- take the first broker directly
+- inspect only the top N brokers
+- apply manual review
+- add further business rules on top of the ranking
 
-## 11. 当前结果如何理解
+## 13. Testing and Verifiability
 
-当前排序结果应这样解读：
+The current implementation uses two types of tests:
 
-- 排名越靠前，表示该 broker 在当前时点、当前规则和当前参数下更值得优先考虑
-- 排序第一名通常可视为默认建议人选
-- 但从算法语义上看，输出首先是一组有顺序的候选列表，而不是一个被唯一决定的人
+1. Formula tests
+   They verify directionality and golden numeric values for terms such as `QuotaGap`, `Burst`, and `OverQuotaDecay`.
 
-因此，上层系统可以根据需要继续做：
+2. Golden ranking tests
+   They build a fixed broker set and verify the final ranking order and key intermediate values.
 
-- 直接选第一名
-- 只看前 N 名
-- 做人工审核
-- 叠加其他业务决策逻辑
+This means the current version is not yet a globally optimized, history-calibrated production parameter system, but it already has:
 
-## 12. 测试与可验证性
+- interpretable formula behavior
+- reproducible numeric outputs
+- regression-safe ranking logic
 
-当前实现已经通过两类测试来保证可验证性：
+## 14. Conclusion
 
-1. 公式测试
-   验证 `QuotaGap`、`Burst`、`OverQuotaDecay` 的方向性和黄金数值
+Current MAQA is a core ranking model for broker ordering. Its purpose is not to cover every bit of production complexity. Its purpose is to stably encode a small set of important principles:
 
-2. 排序黄金样例测试
-   构造一组固定 broker 状态，验证最终排序顺序和关键中间分值
+- matching quality comes first
+- monthly pacing still matters
+- short-term flooding should be controlled
+- operational service readiness should be respected
+- over-quota brokers should receive decaying tail opportunities instead of hard cutoff
 
-这意味着当前版本虽然还不是通过真实历史数据校准出来的最优参数系统，但它已经具备：
-
-- 公式行为可解释
-- 数值结果可复核
-- 排序逻辑可回归验证
-
-## 13. 结论
-
-当前 MAQA 是一套面向 broker 排序的核心算法模型。它的设计重点不是覆盖所有业务复杂度，而是先稳定地表达以下几个关键原则：
-
-- 先看匹配质量
-- 再看月度节奏
-- 控制短周期灌单
-- 兼顾实时服务承接状态
-- 对超额 broker 采用递减尾流，而不是硬停
-
-在此基础上，算法输出一组可解释、可审计、可测试的排序结果，为上层分配系统提供稳定的排序能力。
+On top of these principles, MAQA outputs a ranking that is explainable, auditable, and testable, providing stable ranking capability for upper-layer allocation systems.

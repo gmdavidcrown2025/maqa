@@ -1,5 +1,7 @@
 # MAQA
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 MAQA is a broker ranking library for real-estate lead distribution.
 
 It ranks a set of brokers for a given lead by combining matching quality, monthly pacing, short-term burst control, service readiness, and over-quota tail decay.
@@ -129,7 +131,7 @@ fmt.Println(result.TopBroker())
 
 Cross-language golden fixtures live in [testdata/golden_cases](testdata/golden_cases).
 
-They are used to ensure that Python and Go stay aligned on:
+They are used to keep Python and Go aligned on:
 
 - ranking order
 - deterministic score components
