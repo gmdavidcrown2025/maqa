@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 
 class MAQAConfig(BaseModel):
@@ -25,4 +25,12 @@ class MAQAConfig(BaseModel):
     eta: float = 2.0
 
     # 用于打破近似平分时的小扰动。
-    noise_eps: float = 0.02
+    noise_eps: float = 0.001
+
+    @model_validator(mode="after")
+    def validate_weight_sum(self) -> "MAQAConfig":
+        # 当前版本要求 4 个权重之和保持为 1.0，避免总分量纲漂移。
+        weight_sum = self.w_fit + self.w_q + self.w_b + self.w_srv
+        if abs(weight_sum - 1.0) > 1e-9:
+            raise ValueError("w_fit + w_q + w_b + w_srv must equal 1.0")
+        return self

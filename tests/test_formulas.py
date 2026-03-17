@@ -1,7 +1,29 @@
 import unittest
+from pydantic import ValidationError
 from math import exp, tanh
+from random import Random
 
-from maqa import MAQAConfig, ScoreCalculator
+from maqa import Broker, MAQAConfig, Lead, ScoreCalculator
+
+
+class ConfigValidationTests(unittest.TestCase):
+    def test_weight_sum_must_equal_one(self) -> None:
+        with self.assertRaises(ValidationError):
+            MAQAConfig(w_fit=0.6, w_q=0.25, w_b=0.15, w_srv=0.10)
+
+
+class FitTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.calculator = ScoreCalculator(MAQAConfig())
+        self.lead = Lead(lead_id="lead-fit")
+
+    def test_fit_is_clamped_to_zero_when_input_is_negative(self) -> None:
+        broker = Broker(broker_id="b1", quota_q=30, allocated_count=0, fit_score=-0.3)
+        self.assertEqual(self.calculator.calc_fit(broker, self.lead), 0.0)
+
+    def test_fit_is_clamped_to_one_when_input_exceeds_upper_bound(self) -> None:
+        broker = Broker(broker_id="b1", quota_q=30, allocated_count=0, fit_score=1.4)
+        self.assertEqual(self.calculator.calc_fit(broker, self.lead), 1.0)
 
 
 class QuotaGapTests(unittest.TestCase):
@@ -51,6 +73,33 @@ class BurstTests(unittest.TestCase):
         self.assertAlmostEqual(score, 1.25, places=6)
 
 
+class ServiceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.calculator = ScoreCalculator(MAQAConfig())
+
+    def test_service_is_zero_when_sla_is_not_ok(self) -> None:
+        broker = Broker(
+            broker_id="b1",
+            quota_q=30,
+            allocated_count=0,
+            response_score=0.9,
+            current_load=0.2,
+            sla_ok=False,
+        )
+        self.assertEqual(self.calculator.calc_service(broker), 0.0)
+
+    def test_service_matches_golden_value(self) -> None:
+        broker = Broker(
+            broker_id="b1",
+            quota_q=30,
+            allocated_count=0,
+            response_score=0.8,
+            current_load=0.4,
+        )
+        expected = 0.8 * (1 - 0.5 * 0.4)
+        self.assertAlmostEqual(self.calculator.calc_service(broker), expected, places=6)
+
+
 class OverQuotaDecayTests(unittest.TestCase):
     def setUp(self) -> None:
         self.calculator = ScoreCalculator(MAQAConfig())
@@ -74,6 +123,23 @@ class OverQuotaDecayTests(unittest.TestCase):
         expected = exp(-1.6) * (20 / 30) ** 2
         score = self.calculator.calc_over_quota_decay(quota_q=10, allocated_count=12, day_index=20, days_in_month=30)
         self.assertAlmostEqual(score, expected, places=6)
+
+
+class RawScoreAndNoiseTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = MAQAConfig()
+        self.calculator = ScoreCalculator(self.config)
+
+    def test_raw_score_matches_golden_value(self) -> None:
+        score = self.calculator.calc_raw_score(fit=0.8, quota_gap=0.2, burst=0.5, service=0.9)
+        expected = 0.50 * 0.8 + 0.25 * 0.2 - 0.15 * 0.5 + 0.10 * 0.9
+        self.assertAlmostEqual(score, expected, places=6)
+
+    def test_noise_stays_within_expected_range(self) -> None:
+        base_score = 0.42
+        noisy_score = self.calculator.add_noise(base_score, Random(0))
+        self.assertGreaterEqual(noisy_score, base_score)
+        self.assertLessEqual(noisy_score, base_score + self.config.noise_eps)
 
 
 if __name__ == "__main__":

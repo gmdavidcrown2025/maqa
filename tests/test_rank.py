@@ -75,6 +75,44 @@ class RankingTests(unittest.TestCase):
         self.assertIsNone(result.top_broker)
         self.assertIsNone(result.top_score)
 
+    def test_filters_out_broker_when_sla_is_not_ok(self) -> None:
+        lead = Lead(lead_id="lead-4")
+        healthy_broker = build_broker("b1", quota_q=30, allocated_count=12, fit_score=0.8)
+        sla_blocked_broker = Broker(
+            broker_id="b2",
+            quota_q=30,
+            allocated_count=8,
+            fit_score=0.95,
+            response_score=1.0,
+            current_load=0.0,
+            sla_ok=False,
+        )
+
+        result = self.engine.rank((healthy_broker, sla_blocked_broker), lead, self.context, rng=Random(0))
+
+        self.assertEqual([item.broker.broker_id for item in result.ranked_brokers], ["b1"])
+
+    def test_over_quota_broker_is_still_ranked_instead_of_being_filtered_out(self) -> None:
+        lead = Lead(lead_id="lead-5")
+        normal_broker = build_broker("b1", quota_q=30, allocated_count=14, fit_score=0.75)
+        over_quota_broker = build_broker(
+            "b2",
+            quota_q=30,
+            allocated_count=31,
+            fit_score=0.9,
+            response_score=1.0,
+            current_load=0.0,
+            last_24h_count=1,
+            last_7d_count=7,
+        )
+
+        result = self.engine.rank((normal_broker, over_quota_broker), lead, self.context, rng=Random(0))
+
+        self.assertEqual(len(result.ranked_brokers), 2)
+        self.assertIn("b2", [item.broker.broker_id for item in result.ranked_brokers])
+        over_quota_item = next(item for item in result.ranked_brokers if item.broker.broker_id == "b2")
+        self.assertLess(over_quota_item.score.over_quota_decay, 1.0)
+
     def test_ranking_matches_golden_case(self) -> None:
         lead = Lead(lead_id="lead-golden")
         broker_1 = build_broker(
@@ -107,10 +145,20 @@ class RankingTests(unittest.TestCase):
             last_24h_count=1,
             last_7d_count=14,
         )
+        broker_4 = build_broker(
+            "b4",
+            quota_q=30,
+            allocated_count=31,
+            fit_score=0.7,
+            response_score=0.8,
+            current_load=0.1,
+            last_24h_count=3,
+            last_7d_count=14,
+        )
 
-        result = self.engine.rank((broker_1, broker_2, broker_3), lead, self.context, rng=Random(0))
+        result = self.engine.rank((broker_1, broker_2, broker_3, broker_4), lead, self.context, rng=Random(0))
 
-        self.assertEqual([item.broker.broker_id for item in result.ranked_brokers], ["b1", "b2", "b3"])
+        self.assertEqual([item.broker.broker_id for item in result.ranked_brokers], ["b1", "b2", "b4", "b3"])
         self.assertAlmostEqual(result.ranked_brokers[0].score.quota_gap, 0.289517, places=5)
         self.assertAlmostEqual(result.ranked_brokers[0].score.burst, 0.0, places=6)
         self.assertAlmostEqual(result.ranked_brokers[0].score.service, 0.81, places=6)
@@ -119,8 +167,10 @@ class RankingTests(unittest.TestCase):
         self.assertAlmostEqual(result.ranked_brokers[1].score.quota_gap, 0.174661, places=5)
         self.assertAlmostEqual(result.ranked_brokers[1].score.burst, 1.75, places=6)
         self.assertAlmostEqual(result.ranked_brokers[1].score.final_score, 0.331165, places=5)
-        self.assertAlmostEqual(result.ranked_brokers[2].score.over_quota_decay, 0.027281, places=5)
-        self.assertAlmostEqual(result.ranked_brokers[2].score.final_score, 0.009106, places=5)
+        self.assertAlmostEqual(result.ranked_brokers[2].score.over_quota_decay, 0.135126, places=5)
+        self.assertAlmostEqual(result.ranked_brokers[2].score.final_score, 0.020625, places=5)
+        self.assertAlmostEqual(result.ranked_brokers[3].score.over_quota_decay, 0.027281, places=5)
+        self.assertAlmostEqual(result.ranked_brokers[3].score.final_score, 0.009106, places=5)
 
 
 if __name__ == "__main__":
