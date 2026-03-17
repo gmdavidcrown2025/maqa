@@ -1,0 +1,113 @@
+{
+  "case_id": "ranking_case_001",
+  "description": "综合覆盖匹配质量、QuotaGap、Burst 与超额尾流的排序黄金样例",
+  "config": {
+    "w_fit": 0.5,
+    "w_q": 0.25,
+    "w_b": 0.15,
+    "w_srv": 0.1,
+    "alpha_q": 2.0,
+    "epsilon_q": 0.2,
+    "delta_b": 0.5,
+    "epsilon_b": 0.5,
+    "b_max": 2.0,
+    "beta": 0.8,
+    "eta": 2.0,
+    "noise_eps": 0.001
+  },
+  "context": {
+    "now": "2026-03-17T10:00:00",
+    "day_index": 17,
+    "days_in_month": 31
+  },
+  "lead": {
+    "lead_id": "lead-golden"
+  },
+  "brokers": [
+    {
+      "broker_id": "b1",
+      "quota_q": 30,
+      "allocated_count": 14,
+      "last_24h_count": 2,
+      "last_7d_count": 14,
+      "fit_score": 0.8,
+      "is_eligible": true,
+      "response_score": 0.9,
+      "current_load": 0.2,
+      "sla_ok": true
+    },
+    {
+      "broker_id": "b2",
+      "quota_q": 30,
+      "allocated_count": 15,
+      "last_24h_count": 6,
+      "last_7d_count": 14,
+      "fit_score": 0.9,
+      "is_eligible": true,
+      "response_score": 1.0,
+      "current_load": 0.0,
+      "sla_ok": true
+    },
+    {
+      "broker_id": "b3",
+      "quota_q": 30,
+      "allocated_count": 33,
+      "last_24h_count": 1,
+      "last_7d_count": 14,
+      "fit_score": 0.95,
+      "is_eligible": true,
+      "response_score": 1.0,
+      "current_load": 0.0,
+      "sla_ok": true
+    },
+    {
+      "broker_id": "b4",
+      "quota_q": 30,
+      "allocated_count": 31,
+      "last_24h_count": 3,
+      "last_7d_count": 14,
+      "fit_score": 0.7,
+      "is_eligible": true,
+      "response_score": 0.8,
+      "current_load": 0.1,
+      "sla_ok": true
+    }
+  ],
+  "expected": {
+    "ranked_broker_ids": ["b1", "b2", "b4", "b3"],
+    "scores": {
+      "b1": {
+        "quota_gap": 0.2895172030128249,
+        "burst": 0.0,
+        "service": 0.81,
+        "over_quota_decay": 1.0,
+        "raw_score": 0.5533793007532062,
+        "final_score": 0.5533793007532062
+      },
+      "b2": {
+        "quota_gap": 0.17466124876398187,
+        "burst": 1.75,
+        "service": 1.0,
+        "over_quota_decay": 1.0,
+        "raw_score": 0.33116531219099543,
+        "final_score": 0.33116531219099543
+      },
+      "b4": {
+        "quota_gap": -0.9434587959734504,
+        "burst": 0.25,
+        "service": 0.76,
+        "over_quota_decay": 0.13512598400611553,
+        "raw_score": 0.15263530100663739,
+        "final_score": 0.020624995242591513
+      },
+      "b3": {
+        "quota_gap": -0.9648494075776071,
+        "burst": 0.0,
+        "service": 1.0,
+        "over_quota_decay": 0.027281465661436213,
+        "raw_score": 0.33378764810559824,
+        "final_score": 0.009106216260004433
+      }
+    }
+  }
+}

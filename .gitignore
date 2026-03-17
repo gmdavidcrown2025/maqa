@@ -5,17 +5,33 @@ venv/
 # Python cache
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
 
-# Build artifacts
+# Python build artifacts
 build/
 dist/
 *.egg-info/
+.python-version
 
 # Test and coverage artifacts
 .pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
+coverage/
+
+# Go build and coverage artifacts
+go/bin/
+*.test
+*.out
+coverage.out
+
+# IDE and OS files
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
 
 # Local temp files
 .tmp/
-
