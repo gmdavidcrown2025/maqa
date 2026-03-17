@@ -139,6 +139,12 @@ fmt.Println(result.TopBroker())
 
 `noisy_score` 没有作为跨语言黄金值共享，因为 Python 和 Go 使用的随机数实现不同。
 
+## 许可
+
+本项目采用 Apache License 2.0 许可证。
+
+完整协议见 [LICENSE](LICENSE)。
+
 ## 当前边界
 
 当前仓库的实现范围刻意收敛在核心排序能力上：

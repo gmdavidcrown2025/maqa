@@ -139,6 +139,12 @@ They are used to keep Python and Go aligned on:
 
 `noisy_score` is intentionally not shared as a golden value, because Python and Go use different random number implementations.
 
+## License
+
+This project is licensed under the Apache License 2.0.
+
+See [LICENSE](LICENSE) for the full license text.
+
 ## Status
 
 Current repository scope is intentionally focused:
